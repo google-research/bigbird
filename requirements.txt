@@ -1,0 +1,9 @@
+absl-py
+natsort
+numpy
+rouge-score
+sentencepiece
+tensorflow
+tensorflow-text
+tensor2tensor
+tfds-nightly
