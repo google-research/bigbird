@@ -87,11 +87,6 @@ gsutil cp -r gs://bigbird-transformer/ bigbird/ckpt/
 ```
 
 The storage bucket contains:
-* pretrained BERT model for base and large size
-* pretrained Pegasus Encoder-Decoder Transformer in large size
-* fine-tuned `tf.SavedModel` for long document summarization
-
-The storage bucket contains:
 - pretrained BERT model for base(`bigbr_base`) and large (`bigbr_large`) size. It correspond to BERT/RoBERTa-like encoder only models. Following original BERT and RoBERTa implementation they are transformers with post-normalization, i.e. layer norm is happening after the attention layer. However, following [Rothe et al](https://arxiv.org/abs/1907.12461), we can use them partially in encoder-decoder fashion by coupling the encoder and decoder parameters, as illustrated in [bigbird/summarization/roberta_base.sh](bigbird/summarization/roberta_base.sh) launch script.
 - pretrained Pegasus Encoder-Decoder Transformer in large size(`bigbp_large`). Again following original implementation of Pegasus, they are transformers with pre-normalization. They have full set of separate encoder-decoder weights. Also for long document summarization datasets, we have converted Pegasus checkpoints (`model.ckpt-0`) for each dataset and also provided fine-tuned checkpoints (`model.ckpt-300000`) which works on longer documents.
 - fine-tuned `tf.SavedModel` for long document summarization which can be directly be used for prediction and evaluation as illustrated in the [colab nootebook](bigbird/summarization/eval.ipynb).
