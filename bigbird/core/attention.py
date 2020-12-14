@@ -921,9 +921,10 @@ class MultiHeadedAttentionLayer(tf.compat.v1.layers.Layer):
 
   @property
   def trainable_weights(self):
-    self._trainable_weights = (self.query_layer.trainable_weights +
-                               self.key_layer.trainable_weights +
-                               self.value_layer.trainable_weights)
+    tvar_list = (self.query_layer.trainable_weights +
+                 self.key_layer.trainable_weights +
+                 self.value_layer.trainable_weights)
+    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
     return self._trainable_weights
 
   def call(self,

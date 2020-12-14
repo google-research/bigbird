@@ -78,9 +78,10 @@ class BertModel(tf.compat.v1.layers.Layer):
 
   @property
   def trainable_weights(self):
-    self._trainable_weights = (self.embeder.trainable_weights +
-                               self.encoder.trainable_weights +
-                               self.pooler.trainable_weights)
+    tvar_list = (self.embeder.trainable_weights +
+                 self.encoder.trainable_weights +
+                 self.pooler.trainable_weights)
+    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
     return self._trainable_weights
 
   def call(self,
@@ -181,9 +182,10 @@ class TransformerModel(tf.compat.v1.layers.Layer):
 
   @property
   def trainable_weights(self):
-    self._trainable_weights = (self.embeder.trainable_weights +
-                               self.encoder.trainable_weights +
-                               self.decoder.trainable_weights)
+    tvar_list = (self.embeder.trainable_weights +
+                 self.encoder.trainable_weights +
+                 self.decoder.trainable_weights)
+    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
     return self._trainable_weights
 
   def _encode(self, input_ids, training=None):

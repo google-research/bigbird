@@ -86,12 +86,13 @@ class PrenormEncoderLayer(tf.compat.v1.layers.Layer):
 
   @property
   def trainable_weights(self):
-    self._trainable_weights = (self.attn_layer.trainable_weights +
-                               self.projection_layer.trainable_weights +
-                               self.expand_layer.trainable_weights +
-                               self.contract_layer.trainable_weights +
-                               self.first_layer_norm.trainable_weights +
-                               self.second_layer_norm.trainable_weights)
+    tvar_list = (self.attn_layer.trainable_weights +
+                 self.projection_layer.trainable_weights +
+                 self.expand_layer.trainable_weights +
+                 self.contract_layer.trainable_weights +
+                 self.first_layer_norm.trainable_weights +
+                 self.second_layer_norm.trainable_weights)
+    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
     return self._trainable_weights
 
   def call(self,
@@ -235,12 +236,13 @@ class PostnormEncoderLayer(tf.compat.v1.layers.Layer):
 
   @property
   def trainable_weights(self):
-    self._trainable_weights = (self.attn_layer.trainable_weights +
-                               self.projection_layer.trainable_weights +
-                               self.expand_layer.trainable_weights +
-                               self.contract_layer.trainable_weights +
-                               self.first_layer_norm.trainable_weights +
-                               self.second_layer_norm.trainable_weights)
+    tvar_list = (self.attn_layer.trainable_weights +
+                 self.projection_layer.trainable_weights +
+                 self.expand_layer.trainable_weights +
+                 self.contract_layer.trainable_weights +
+                 self.first_layer_norm.trainable_weights +
+                 self.second_layer_norm.trainable_weights)
+    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
     return self._trainable_weights
 
   def call(self,
@@ -355,9 +357,10 @@ class EncoderStack(tf.compat.v1.layers.Layer):
 
   @property
   def trainable_weights(self):
-    self._trainable_weights = sum(
+    tvar_list = sum(
         [layer.trainable_weights for layer in self.encoder_layers],
         []) +  self.layer_norm.trainable_weights
+    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
     return self._trainable_weights
 
   def call(self,

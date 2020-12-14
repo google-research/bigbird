@@ -665,4 +665,5 @@ def main(_):
 
 if __name__ == "__main__":
   tf.compat.v1.disable_v2_behavior()
+  tf.compat.v1.enable_resource_variables()
   app.run(main)
