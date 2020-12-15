@@ -152,5 +152,7 @@ used to set the number of random blocks. The code currently uses window size of
 
 Important points to note:
 * Hidden dimension should be divisible by the number of heads.
+* Currently the code only handles tensors of static shape as it is primarily designed
+for TPUs which only works with statically shaped tensors.
 * For sequene length less than 1024, using `original_full` is advised as there
 is no benefit in using sparse BigBird attention.
