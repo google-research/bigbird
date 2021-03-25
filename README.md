@@ -158,6 +158,7 @@ for TPUs which only works with statically shaped tensors.
 is no benefit in using sparse BigBird attention.
 
 ## Comparisons
-Recently, [Long Range Arena](https://arxiv.org/pdf/2011.04006.pdf) provided a benchmark of six tasks that require longer context, and performed experiments to benchmark all existing long range transformers. The results are shown below. BigBird model, unlike its counterparts, clearly reduces memory consumption without sacrificing performance
+Recently, [Long Range Arena](https://arxiv.org/pdf/2011.04006.pdf) provided a benchmark of six tasks that require longer context, and performed experiments to benchmark all existing long range transformers. The results are shown below. BigBird model, unlike its counterparts, clearly reduces memory consumption without sacrificing performance.
+
 <img src="https://github.com/google-research/bigbird/blob/master/comparison.png" width="50%">
 
