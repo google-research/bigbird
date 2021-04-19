@@ -1,4 +1,4 @@
-# Copyright 2020 The BigBird Authors.
+# Copyright 2021 The BigBird Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,11 +16,12 @@
 
 from bigbird.core import attention
 from bigbird.core import beam_search
+from bigbird.core import recompute_grad
 from bigbird.core import utils
 import tensorflow.compat.v2 as tf
 
 
-class PrenormDecoderLayer(tf.compat.v1.layers.Layer):
+class PrenormDecoderLayer(tf.keras.layers.Layer):
   """Decoder layer of a transformer in Pegasus style.
 
   The layer_norm is taken before self-attention.
@@ -52,55 +53,68 @@ class PrenormDecoderLayer(tf.compat.v1.layers.Layer):
       name: The name scope of this layer.
     """
     super(PrenormDecoderLayer, self).__init__(name=name)
-    self.hidden_dropout_prob = hidden_dropout_prob
 
-    # Attention layers
-    attention_head_size = hidden_size // num_attention_heads
-    self.self_attn_layer = attention.MultiHeadedAttentionLayer(
-        "original_full", use_bias=use_bias, name="self",
-        num_attention_heads=num_attention_heads,
-        size_per_head=attention_head_size,
-        initializer_range=initializer_range,
-        attention_probs_dropout_prob=attention_probs_dropout_prob)
-    self.cross_attn_layer = attention.MultiHeadedAttentionLayer(
-        "original_full", use_bias=use_bias, name="encdec",
-        num_attention_heads=num_attention_heads,
-        size_per_head=attention_head_size,
-        initializer_range=initializer_range,
-        attention_probs_dropout_prob=attention_probs_dropout_prob)
+    with tf.compat.v1.variable_scope(name):
 
-    # Dense layers
-    self.self_proj_layer = utils.Dense3dProjLayer(
-        num_attention_heads, attention_head_size,
-        utils.create_initializer(initializer_range), None, "dense", use_bias)
-    self.cross_proj_layer = utils.Dense3dProjLayer(
-        num_attention_heads, attention_head_size,
-        utils.create_initializer(initializer_range), None, "dense", use_bias)
-    self.expand_layer = utils.Dense2dLayer(
-        intermediate_size, utils.create_initializer(initializer_range),
-        intermediate_act_fn, "dense")
-    self.contract_layer = utils.Dense2dLayer(
-        hidden_size, utils.create_initializer(initializer_range),
-        None, "dense")
+      attention_head_size = hidden_size // num_attention_heads
+      with tf.compat.v1.variable_scope("attention"):
+        # Pre-Normalization layer
+        with tf.compat.v1.variable_scope("self"):
+          self.first_layer_norm = utils.NormLayer(hidden_size)
+        # Self-Attention layer
+        self.self_attn_layer = attention.MultiHeadedAttentionLayer(
+            "original_full", use_bias=use_bias, name="self",
+            num_attention_heads=num_attention_heads,
+            size_per_head=attention_head_size,
+            initializer_range=initializer_range,
+            attention_probs_dropout_prob=attention_probs_dropout_prob)
+        # Feedforward layer
+        with tf.compat.v1.variable_scope("output"):
+          self.self_proj_layer = utils.Dense3dProjLayer(
+              num_attention_heads, attention_head_size,
+              utils.create_initializer(initializer_range), None,
+              "dense", use_bias)
+        # Dropout
+        self.self_attn_dropout = recompute_grad.RecomputingDropout(
+            hidden_dropout_prob)
+        # Pre-Normalization layer
+        with tf.compat.v1.variable_scope("encdec"):
+          self.second_layer_norm = utils.NormLayer(hidden_size)
+        # Cross-Attention layer
+        self.cross_attn_layer = attention.MultiHeadedAttentionLayer(
+            "original_full", use_bias=use_bias, name="encdec",
+            num_attention_heads=num_attention_heads,
+            size_per_head=attention_head_size,
+            initializer_range=initializer_range,
+            attention_probs_dropout_prob=attention_probs_dropout_prob)
+        # Feedforward layer
+        with tf.compat.v1.variable_scope("encdec_output"):
+          self.cross_proj_layer = utils.Dense3dProjLayer(
+              num_attention_heads, attention_head_size,
+              utils.create_initializer(initializer_range), None,
+              "dense", use_bias)
+        # Dropout
+        self.cross_attn_dropout = recompute_grad.RecomputingDropout(
+            hidden_dropout_prob)
 
-    # Normalization layer
-    self.first_layer_norm = utils.NormLayer()
-    self.second_layer_norm = utils.NormLayer()
-    self.third_layer_norm = utils.NormLayer()
+      with tf.compat.v1.variable_scope("intermediate"):
+        # Normalization layer
+        self.third_layer_norm = utils.NormLayer(hidden_size)
+        # Feedforward layer
+        self.expand_layer = utils.Dense2dLayer(
+            hidden_size, intermediate_size,
+            utils.create_initializer(initializer_range),
+            intermediate_act_fn, "dense")
 
-  @property
-  def trainable_weights(self):
-    tvar_list = (self.self_attn_layer.trainable_weights +
-                 self.cross_attn_layer.trainable_weights +
-                 self.self_proj_layer.trainable_weights +
-                 self.cross_proj_layer.trainable_weights +
-                 self.expand_layer.trainable_weights +
-                 self.contract_layer.trainable_weights +
-                 self.first_layer_norm.trainable_weights +
-                 self.second_layer_norm.trainable_weights +
-                 self.third_layer_norm.trainable_weights)
-    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
-    return self._trainable_weights
+      with tf.compat.v1.variable_scope("output"):
+        # Feedforward layer
+        self.contract_layer = utils.Dense2dLayer(
+            intermediate_size, hidden_size,
+            utils.create_initializer(initializer_range),
+            None, "dense")
+        # Dropout
+        self.output_dropout = recompute_grad.RecomputingDropout(
+            hidden_dropout_prob)
 
   def call(self,
            layer_input,
@@ -138,54 +152,45 @@ class PrenormDecoderLayer(tf.compat.v1.layers.Layer):
       ValueError: Any of the arguments or tensor shapes are invalid.
       NotImplementedError: For unknown attention type.
     """
-    with tf.compat.v1.variable_scope("attention"):
-      with tf.compat.v1.variable_scope("self") as sc:
-        normalized_layer_input = self.first_layer_norm(layer_input)
-        self_attention_output = self.self_attn_layer(
-            normalized_layer_input, normalized_layer_input, self_attention_mask,
-            cache=cache, decode_i=decode_i, training=training, scope=sc)
+    # self-attention
+    normalized_layer_input = self.first_layer_norm(layer_input)
+    self_attention_output = self.self_attn_layer(
+        normalized_layer_input, normalized_layer_input, [self_attention_mask],
+        cache=cache, decode_i=decode_i, training=training)
 
-      # Run a linear projection of `hidden_size` then add a residual
-      # with `layer_input`.
-      with tf.compat.v1.variable_scope("output"):
-        self_attention_output = self.self_proj_layer(self_attention_output)
-        self_attention_output = utils.dropout(self_attention_output,
-                                              self.hidden_dropout_prob,
-                                              training)
-        self_attention_output = self_attention_output + layer_input
+    # Run a linear projection of `hidden_size` then add a residual
+    # with `layer_input`.
+    self_attention_output = self.self_proj_layer(self_attention_output)
+    self_attention_output = self.self_attn_dropout(self_attention_output,
+                                                   training=training)
+    self_attention_output = self_attention_output + layer_input
 
-      with tf.compat.v1.variable_scope("encdec") as sc:
-        normalized_self_attention_output = self.second_layer_norm(
-            self_attention_output)
-        attention_output = self.cross_attn_layer(
-            normalized_self_attention_output, encoder_outputs, attention_mask,
-            training=training, scope=sc)
+    # Cross-attention
+    normalized_self_attention_output = self.second_layer_norm(
+        self_attention_output)
+    attention_output = self.cross_attn_layer(
+        normalized_self_attention_output, encoder_outputs, [attention_mask],
+        training=training)
 
-      # Run a linear projection of `hidden_size` then add a residual
-      # with `layer_input`.
-      with tf.compat.v1.variable_scope("encdec_output"):
-        attention_output = self.cross_proj_layer(attention_output)
-        attention_output = utils.dropout(attention_output,
-                                         self.hidden_dropout_prob,
-                                         training)
-        attention_output = attention_output + self_attention_output
+    # Run a linear projection of `hidden_size` then add a residual
+    # with `layer_input`.
+    attention_output = self.cross_proj_layer(attention_output)
+    attention_output = self.cross_attn_dropout(attention_output,
+                                               training=training)
+    attention_output = attention_output + self_attention_output
 
     # The activation is only applied to the "intermediate" hidden layer.
-    with tf.compat.v1.variable_scope("intermediate"):
-      normalized_attention_output = self.third_layer_norm(attention_output)
-      intermediate_output = self.expand_layer(normalized_attention_output)
+    normalized_attention_output = self.third_layer_norm(attention_output)
+    intermediate_output = self.expand_layer(normalized_attention_output)
 
     # Down-project back to `hidden_size` then add the residual.
-    with tf.compat.v1.variable_scope("output"):
-      layer_output = self.contract_layer(intermediate_output)
-      layer_output = utils.dropout(layer_output,
-                                   self.hidden_dropout_prob,
-                                   training)
-      layer_output = layer_output + attention_output
+    layer_output = self.contract_layer(intermediate_output)
+    layer_output = self.output_dropout(layer_output, training=training)
+    layer_output = layer_output + attention_output
     return layer_output
 
 
-class PostnormDecoderLayer(tf.compat.v1.layers.Layer):
+class PostnormDecoderLayer(tf.keras.layers.Layer):
   """Decoder layer of a transformer in BERT style.
 
   The layer_norm is taken before self-attention.
@@ -217,55 +222,69 @@ class PostnormDecoderLayer(tf.compat.v1.layers.Layer):
       name: The name scope of this layer.
     """
     super(PostnormDecoderLayer, self).__init__(name=name)
-    self.hidden_dropout_prob = hidden_dropout_prob
 
-    # Attention layers
-    attention_head_size = hidden_size // num_attention_heads
-    self.self_attn_layer = attention.MultiHeadedAttentionLayer(
-        "original_full", use_bias=use_bias, name="self",
-        num_attention_heads=num_attention_heads,
-        size_per_head=attention_head_size,
-        initializer_range=initializer_range,
-        attention_probs_dropout_prob=attention_probs_dropout_prob)
-    self.cross_attn_layer = attention.MultiHeadedAttentionLayer(
-        "original_full", use_bias=use_bias, name="encdec",
-        num_attention_heads=num_attention_heads,
-        size_per_head=attention_head_size,
-        initializer_range=initializer_range,
-        attention_probs_dropout_prob=attention_probs_dropout_prob)
+    with tf.compat.v1.variable_scope(name):
 
-    # Dense layers
-    self.self_proj_layer = utils.Dense3dProjLayer(
-        num_attention_heads, attention_head_size,
-        utils.create_initializer(initializer_range), None, "dense", use_bias)
-    self.cross_proj_layer = utils.Dense3dProjLayer(
-        num_attention_heads, attention_head_size,
-        utils.create_initializer(initializer_range), None, "dense", use_bias)
-    self.expand_layer = utils.Dense2dLayer(
-        intermediate_size, utils.create_initializer(initializer_range),
-        intermediate_act_fn, "dense")
-    self.contract_layer = utils.Dense2dLayer(
-        hidden_size, utils.create_initializer(initializer_range),
-        None, "dense")
+      attention_head_size = hidden_size // num_attention_heads
+      with tf.compat.v1.variable_scope("attention"):
+        # Self-Attention layers
+        self.self_attn_layer = attention.MultiHeadedAttentionLayer(
+            "original_full", use_bias=use_bias, name="self",
+            num_attention_heads=num_attention_heads,
+            size_per_head=attention_head_size,
+            initializer_range=initializer_range,
+            attention_probs_dropout_prob=attention_probs_dropout_prob)
 
-    # Normalization layer
-    self.first_layer_norm = utils.NormLayer()
-    self.second_layer_norm = utils.NormLayer()
-    self.third_layer_norm = utils.NormLayer()
+        with tf.compat.v1.variable_scope("output"):
+          # Feedforward layer
+          self.self_proj_layer = utils.Dense3dProjLayer(
+              num_attention_heads, attention_head_size,
+              utils.create_initializer(initializer_range), None,
+              "dense", use_bias)
+          # Post-Normalization layer
+          self.first_layer_norm = utils.NormLayer(hidden_size)
+          # Dropout
+          self.self_attn_dropout = recompute_grad.RecomputingDropout(
+              hidden_dropout_prob)
 
-  @property
-  def trainable_weights(self):
-    tvar_list = (self.self_attn_layer.trainable_weights +
-                 self.cross_attn_layer.trainable_weights +
-                 self.self_proj_layer.trainable_weights +
-                 self.cross_proj_layer.trainable_weights +
-                 self.expand_layer.trainable_weights +
-                 self.contract_layer.trainable_weights +
-                 self.first_layer_norm.trainable_weights +
-                 self.second_layer_norm.trainable_weights +
-                 self.third_layer_norm.trainable_weights)
-    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
-    return self._trainable_weights
+        # Cross-Attention layers
+        self.cross_attn_layer = attention.MultiHeadedAttentionLayer(
+            "original_full", use_bias=use_bias, name="encdec",
+            num_attention_heads=num_attention_heads,
+            size_per_head=attention_head_size,
+            initializer_range=initializer_range,
+            attention_probs_dropout_prob=attention_probs_dropout_prob)
+
+        with tf.compat.v1.variable_scope("encdec_output"):
+          # Feedforward layer
+          self.cross_proj_layer = utils.Dense3dProjLayer(
+              num_attention_heads, attention_head_size,
+              utils.create_initializer(initializer_range), None,
+              "dense", use_bias)
+          # Post-Normalization layer
+          self.second_layer_norm = utils.NormLayer(hidden_size)
+          # Dropout
+          self.cross_attn_dropout = recompute_grad.RecomputingDropout(
+              hidden_dropout_prob)
+
+      with tf.compat.v1.variable_scope("intermediate"):
+        # Feedforward layer
+        self.expand_layer = utils.Dense2dLayer(
+            hidden_size, intermediate_size,
+            utils.create_initializer(initializer_range),
+            intermediate_act_fn, "dense")
+
+      with tf.compat.v1.variable_scope("output"):
+        # Feedforward layer
+        self.contract_layer = utils.Dense2dLayer(
+            intermediate_size, hidden_size,
+            utils.create_initializer(initializer_range),
+            None, "dense")
+        # Normalization layer
+        self.third_layer_norm = utils.NormLayer(hidden_size)
+        # Dropout
+        self.output_dropout = recompute_grad.RecomputingDropout(
+            hidden_dropout_prob)
 
   def call(self,
            layer_input,
@@ -303,60 +322,76 @@ class PostnormDecoderLayer(tf.compat.v1.layers.Layer):
       ValueError: Any of the arguments or tensor shapes are invalid.
       NotImplementedError: For unknown attention type.
     """
-    with tf.compat.v1.variable_scope("attention"):
-      with tf.compat.v1.variable_scope("self") as sc:
-        self_attention_output = self.self_attn_layer(
-            layer_input, layer_input, self_attention_mask,
-            cache=cache, decode_i=decode_i, training=training, scope=sc)
+    # self-attention
+    self_attention_output = self.self_attn_layer(
+        layer_input, layer_input, [self_attention_mask],
+        cache=cache, decode_i=decode_i, training=training)
 
-      # Run a linear projection of `hidden_size` then add a residual
-      # with `layer_input`.
-      with tf.compat.v1.variable_scope("output"):
-        self_attention_output = self.self_proj_layer(self_attention_output)
-        self_attention_output = utils.dropout(self_attention_output,
-                                              self.hidden_dropout_prob,
-                                              training)
-        self_attention_output = self.first_layer_norm(
-            self_attention_output + layer_input)
+    # Run a linear projection of `hidden_size` then add a residual
+    # with `layer_input`.
+    self_attention_output = self.self_proj_layer(self_attention_output)
+    self_attention_output = self.self_attn_dropout(self_attention_output,
+                                                   training=training)
+    self_attention_output = self.first_layer_norm(
+        self_attention_output + layer_input)
 
-      with tf.compat.v1.variable_scope("encdec") as sc:
-        attention_output = self.cross_attn_layer(
-            self_attention_output, encoder_outputs, attention_mask,
-            training=training, scope=sc)
+    # cross-attention
+    attention_output = self.cross_attn_layer(
+        self_attention_output, encoder_outputs, [attention_mask],
+        training=training)
 
-      # Run a linear projection of `hidden_size` then add a residual
-      # with `layer_input`.
-      with tf.compat.v1.variable_scope("encdec_output"):
-        attention_output = self.cross_proj_layer(attention_output)
-        attention_output = utils.dropout(attention_output,
-                                         self.hidden_dropout_prob,
-                                         training)
-        attention_output = self.second_layer_norm(
-            attention_output + self_attention_output)
+    # Run a linear projection of `hidden_size` then add a residual
+    # with `layer_input`.
+    attention_output = self.cross_proj_layer(attention_output)
+    attention_output = self.cross_attn_dropout(attention_output,
+                                               training=training)
+    attention_output = self.second_layer_norm(
+        attention_output + self_attention_output)
 
     # The activation is only applied to the "intermediate" hidden layer.
-    with tf.compat.v1.variable_scope("intermediate"):
-      intermediate_output = self.expand_layer(attention_output)
+    intermediate_output = self.expand_layer(attention_output)
 
     # Down-project back to `hidden_size` then add the residual.
-    with tf.compat.v1.variable_scope("output"):
-      layer_output = self.contract_layer(intermediate_output)
-      layer_output = utils.dropout(layer_output,
-                                   self.hidden_dropout_prob,
-                                   training)
-      layer_output = self.third_layer_norm(layer_output + attention_output)
+    layer_output = self.contract_layer(intermediate_output)
+    layer_output = self.output_dropout(layer_output, training=training)
+    layer_output = self.third_layer_norm(layer_output + attention_output)
     return layer_output
 
 
-class DecoderStack(tf.compat.v1.layers.Layer):
+def add_gradient_recomputation(original_class):
+  """Creats a subclass which enables gradient checkpointing."""
+
+  class RecomputeLayer(original_class):
+    """Transformer layer that recomputes the forward pass during backprop."""
+
+    def call(self,
+             layer_input,
+             encoder_outputs,
+             self_attention_mask,
+             attention_mask,
+             cache=None,
+             decode_i=None,
+             training=None):
+
+      def f(layer_input, encoder_outputs):
+        x = super(RecomputeLayer, self).call(
+            layer_input, encoder_outputs, self_attention_mask, attention_mask,
+            cache, decode_i, training=training)
+        return x
+
+      f = recompute_grad.recompute_grad(f)
+
+      return f(layer_input, encoder_outputs)
+  return RecomputeLayer
+
+
+class DecoderStack(tf.keras.layers.Layer):
   """Transformer decoder stack."""
 
   def __init__(self, params):
     if params["couple_encoder_decoder"]:
       name = "encoder"
-      with tf.compat.v1.variable_scope(
-          name, reuse=tf.compat.v1.AUTO_REUSE) as scope:
-        super(DecoderStack, self).__init__(name=name, _scope=scope)
+      super(DecoderStack, self).__init__(name=name)
     else:
       name = "decoder"
       super(DecoderStack, self).__init__(name=name)
@@ -371,36 +406,32 @@ class DecoderStack(tf.compat.v1.layers.Layer):
       raise NotImplementedError(
           "Norm type {} is not implemented".format(params["norm_type"]))
 
+    if params["use_gradient_checkpointing"]:
+      decoder_class = add_gradient_recomputation(decoder_class)
+
     if self.params.get("num_decoder_layers", None) is not None:
       num_hidden_layers = self.params["num_decoder_layers"]
     else:
       num_hidden_layers = self.params["num_hidden_layers"]
 
-    # Decoder layers
-    self.decoder_layers = [
-        decoder_class(  # pylint: disable=g-complex-comprehension
-            self.params["hidden_size"],
-            self.params["intermediate_size"],
-            utils.get_activation(self.params["hidden_act"]),
-            self.params["attention_probs_dropout_prob"],
-            self.params["hidden_dropout_prob"],
-            self.params["initializer_range"],
-            self.params["num_attention_heads"],
-            self.params["use_bias"],
-            name="layer_%d" % layer_idx)
-        for layer_idx in range(num_hidden_layers)
-    ]
+    with tf.compat.v1.variable_scope(name):
+      # Decoder layers
+      self.decoder_layers = [
+          decoder_class(  # pylint: disable=g-complex-comprehension
+              self.params["hidden_size"],
+              self.params["intermediate_size"],
+              utils.get_activation(self.params["hidden_act"]),
+              self.params["attention_probs_dropout_prob"],
+              self.params["hidden_dropout_prob"],
+              self.params["initializer_range"],
+              self.params["num_attention_heads"],
+              self.params["use_bias"],
+              name="layer_%d" % layer_idx)
+          for layer_idx in range(num_hidden_layers)
+      ]
 
-    # Normalization layer
-    self.layer_norm = utils.NormLayer()
-
-  @property
-  def trainable_weights(self):
-    tvar_list = sum(
-        [layer.trainable_weights for layer in self.decoder_layers],
-        []) +  self.layer_norm.trainable_weights
-    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
-    return self._trainable_weights
+      # Normalization layer
+      self.layer_norm = utils.NormLayer(self.params["hidden_size"])
 
   def call(self,
            decoder_inputs,
@@ -436,9 +467,7 @@ class DecoderStack(tf.compat.v1.layers.Layer):
     """
     # Expand encoder mask to broadcast over num heads and from_seq axis
     attention_mask = tf.expand_dims(tf.expand_dims(encoder_mask, 1), 1)
-
-    # if self.params["use_gradient_checkpointing"]::
-    #   decoder_layer = recompute_gradient(decoder_layer)
+    attention_mask = tf.cast(attention_mask, tf.float32)
 
     if self.params["norm_type"] == "postnorm":
       decoder_inputs = self.layer_norm(decoder_inputs)
@@ -448,7 +477,7 @@ class DecoderStack(tf.compat.v1.layers.Layer):
       layer_cache = cache[layer.name] if cache is not None else None
       layer_output = layer(
           layer_output, encoder_outputs, self_attention_mask, attention_mask,
-          layer_cache, decode_i, training)
+          layer_cache, decode_i, training=training)
 
     if self.params["norm_type"] == "prenorm":
       layer_output = self.layer_norm(layer_output)

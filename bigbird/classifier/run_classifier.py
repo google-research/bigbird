@@ -1,4 +1,4 @@
-# Copyright 2020 The BigBird Authors.
+# Copyright 2021 The BigBird Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -238,7 +238,8 @@ def model_fn_builder(bert_config):
 
     model = modeling.BertModel(bert_config)
     headl = ClassifierLossLayer(
-        bert_config["num_labels"], bert_config["hidden_dropout_prob"],
+        bert_config["hidden_size"], bert_config["num_labels"],
+        bert_config["hidden_dropout_prob"],
         utils.create_initializer(bert_config["initializer_range"]),
         name=bert_config["scope"]+"/classifier")
 
@@ -310,44 +311,41 @@ def model_fn_builder(bert_config):
   return model_fn
 
 
-class ClassifierLossLayer(tf.compat.v1.layers.Layer):
+class ClassifierLossLayer(tf.keras.layers.Layer):
   """Final classifier layer with loss."""
 
   def __init__(self,
+               hidden_size,
                num_labels,
                dropout_prob=0.0,
                initializer=None,
                use_bias=True,
                name="classifier"):
     super(ClassifierLossLayer, self).__init__(name=name)
+    self.hidden_size = hidden_size
     self.num_labels = num_labels
     self.initializer = initializer
-    self.dropout_prob = dropout_prob
+    self.dropout = tf.keras.layers.Dropout(dropout_prob)
     self.use_bias = use_bias
 
-    self.w = None
-    self.b = None
-
-  def call(self, input_tensor, labels=None, training=None):
-    last_dim = utils.get_shape_list(input_tensor)[-1]
-    input_tensor = utils.dropout(input_tensor, self.dropout_prob, training)
-
-    if self.w is None:
+    with tf.compat.v1.variable_scope(name):
       self.w = tf.compat.v1.get_variable(
           name="kernel",
-          shape=[last_dim, self.num_labels],
+          shape=[self.hidden_size, self.num_labels],
           initializer=self.initializer)
-      self.initializer = None
-      self._trainable_weights.append(self.w)
-    logits = tf.matmul(input_tensor, self.w)
-
-    if self.use_bias:
-      if self.b is None:
+      if self.use_bias:
         self.b = tf.compat.v1.get_variable(
             name="bias",
             shape=[self.num_labels],
             initializer=tf.zeros_initializer)
-        self._trainable_weights.append(self.b)
+      else:
+        self.b = None
+
+  def call(self, input_tensor, labels=None, training=None):
+    input_tensor = self.dropout(input_tensor, training)
+
+    logits = tf.matmul(input_tensor, self.w)
+    if self.use_bias:
       logits = tf.nn.bias_add(logits, self.b)
 
     log_probs = tf.nn.log_softmax(logits, axis=-1)
@@ -382,6 +380,7 @@ def main(_):
 
   model_fn = model_fn_builder(bert_config)
   estimator = utils.get_estimator(bert_config, model_fn)
+  tmp_data_dir = os.path.join(FLAGS.output_dir, "tfds")
 
   if FLAGS.do_train:
     logging.info("***** Running training *****")
@@ -392,7 +391,7 @@ def main(_):
         vocab_model_file=FLAGS.vocab_model_file,
         max_encoder_length=FLAGS.max_encoder_length,
         substitute_newline=FLAGS.substitute_newline,
-        tmp_dir=os.path.join(FLAGS.output_dir, "tfds"),
+        tmp_dir=tmp_data_dir,
         is_training=True)
     estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
 
@@ -405,7 +404,7 @@ def main(_):
         vocab_model_file=FLAGS.vocab_model_file,
         max_encoder_length=FLAGS.max_encoder_length,
         substitute_newline=FLAGS.substitute_newline,
-        tmp_dir=os.path.join(FLAGS.output_dir, "tfds"),
+        tmp_dir=tmp_data_dir,
         is_training=False)
 
     if FLAGS.use_tpu:

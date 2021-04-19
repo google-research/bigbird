@@ -1,4 +1,4 @@
-# Copyright 2020 The BigBird Authors.
+# Copyright 2021 The BigBird Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -87,6 +87,9 @@ flags.DEFINE_bool(
 flags.DEFINE_bool(
     "rescale_embedding", False,
     "Whether to rescale word embedding by hidden dimensions.")
+flags.DEFINE_bool(
+    "use_gradient_checkpointing", False,
+    "Whether to recompute encoder fwd pass during back prop for saving memory.")
 flags.DEFINE_string(
     "scope", "bert",
     "Variable scope name.")
@@ -202,6 +205,7 @@ def as_dictionary():
       "scope": FLAGS.scope,
       "use_bias": FLAGS.use_bias,
       "rescale_embedding": FLAGS.rescale_embedding,
+      "use_gradient_checkpointing": FLAGS.use_gradient_checkpointing,
       "vocab_model_file": FLAGS.vocab_model_file,
       # sparse mask configs
       "attention_type": FLAGS.attention_type,

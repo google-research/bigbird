@@ -1,4 +1,4 @@
-# Copyright 2020 The BigBird Authors.
+# Copyright 2021 The BigBird Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,13 +16,14 @@
 
 import copy
 
+from absl import logging
 from bigbird.core import decoder
 from bigbird.core import encoder
 from bigbird.core import utils
 import tensorflow.compat.v2 as tf
 
 
-class BertModel(tf.compat.v1.layers.Layer):
+class BertModel(tf.keras.layers.Layer):
   """BERT model ("Bidirectional Encoder Representations from Transformers").
 
   Example usage:
@@ -53,9 +54,26 @@ class BertModel(tf.compat.v1.layers.Layer):
     """
     self.params = copy.deepcopy(params)
     self.scope = params["scope"]
+    super(BertModel, self).__init__(name=self.scope)
 
-    with tf.compat.v1.variable_scope(
-        self.scope, reuse=tf.compat.v1.AUTO_REUSE) as vs:
+    # validate params
+    self.pad = lambda x: x
+    if params["max_encoder_length"] <= 512:
+      logging.info("Switching to full attention for short sequences")
+      self.params["attention_type"] = "original_full"
+    if self.params["attention_type"] == "simulated_sparse" or self.params[
+        "attention_type"] == "block_sparse":
+      if params["max_encoder_length"] % params["block_size"]:
+        logging.info("Expand max_encoder_length to next multiple of block_size")
+        self.params["max_encoder_length"] = (
+            params["max_encoder_length"] // params["block_size"] +
+            1) * params["block_size"]
+        pad_size = self.params["max_encoder_length"] - params[
+            "max_encoder_length"]
+        paddings = [[0, 0], [0, pad_size]]
+        self.pad = lambda x: tf.pad(x, paddings)
+
+    with tf.compat.v1.variable_scope(self.scope, reuse=tf.compat.v1.AUTO_REUSE):
       self.embeder = utils.EmbeddingLayer(
           vocab_size=self.params["vocab_size"],
           emb_dim=self.params["hidden_size"],
@@ -68,21 +86,13 @@ class BertModel(tf.compat.v1.layers.Layer):
           max_position_embeddings=self.params["max_position_embeddings"],
           dropout_prob=self.params["hidden_dropout_prob"])
       self.encoder = encoder.EncoderStack(self.params)
-      self.pooler = tf.compat.v1.layers.Dense(
-          units=self.params["hidden_size"],
-          activation=tf.tanh,
-          kernel_initializer=utils.create_initializer(
+      self.pooler = utils.SimpleDenseLayer(
+          input_size=self.params["hidden_size"],
+          output_size=self.params["hidden_size"],
+          initializer=utils.create_initializer(
               self.params["initializer_range"]),
+          activation=tf.tanh,
           name="pooler/dense")
-      super(BertModel, self).__init__(name=self.scope, _scope=vs)
-
-  @property
-  def trainable_weights(self):
-    tvar_list = (self.embeder.trainable_weights +
-                 self.encoder.trainable_weights +
-                 self.pooler.trainable_weights)
-    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
-    return self._trainable_weights
 
   def call(self,
            input_ids,
@@ -103,8 +113,13 @@ class BertModel(tf.compat.v1.layers.Layer):
       ValueError: The config is invalid or one of the input tensor shapes
         is invalid.
     """
+    # pad if needed
+    input_ids = self.pad(input_ids)
+
     if token_type_ids is None:
       token_type_ids = tf.zeros_like(input_ids, dtype=tf.int32)
+    else:
+      token_type_ids = self.pad(token_type_ids)
 
     # Perform embedding lookup on the word ids.
     embedding_output = self.embeder(input_ids,
@@ -132,7 +147,7 @@ class BertModel(tf.compat.v1.layers.Layer):
     return sequence_output, pooled_output
 
 
-class TransformerModel(tf.compat.v1.layers.Layer):
+class TransformerModel(tf.keras.layers.Layer):
   """Encoder-Decoder transformer model.
 
   Example usage:
@@ -162,9 +177,26 @@ class TransformerModel(tf.compat.v1.layers.Layer):
     """
     self.params = copy.deepcopy(params)
     self.scope = params["scope"]
+    super(TransformerModel, self).__init__(name=self.scope)
 
-    with tf.compat.v1.variable_scope(
-        self.scope, reuse=tf.compat.v1.AUTO_REUSE) as vs:
+    # validate params
+    self.pad = lambda x: x
+    if params["max_encoder_length"] <= 512:
+      logging.info("Switching to full attention for short sequences")
+      self.params["attention_type"] = "original_full"
+    if self.params["attention_type"] == "simulated_sparse" or self.params[
+        "attention_type"] == "block_sparse":
+      if params["max_encoder_length"] % params["block_size"]:
+        logging.info("Expand max_encoder_length to next multiple of block_size")
+        self.params["max_encoder_length"] = (
+            params["max_encoder_length"] // params["block_size"] +
+            1) * params["block_size"]
+        pad_size = self.params["max_encoder_length"] - params[
+            "max_encoder_length"]
+        paddings = [[0, 0], [0, pad_size]]
+        self.pad = lambda x: tf.pad(x, paddings)
+
+    with tf.compat.v1.variable_scope(self.scope, reuse=tf.compat.v1.AUTO_REUSE):
       self.embeder = utils.EmbeddingLayer(
           vocab_size=self.params["vocab_size"],
           emb_dim=self.params["hidden_size"],
@@ -178,15 +210,6 @@ class TransformerModel(tf.compat.v1.layers.Layer):
           dropout_prob=self.params["hidden_dropout_prob"])
       self.encoder = encoder.EncoderStack(self.params)
       self.decoder = decoder.DecoderStack(self.params)
-      super(TransformerModel, self).__init__(name=self.scope, _scope=vs)
-
-  @property
-  def trainable_weights(self):
-    tvar_list = (self.embeder.trainable_weights +
-                 self.encoder.trainable_weights +
-                 self.decoder.trainable_weights)
-    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
-    return self._trainable_weights
 
   def _encode(self, input_ids, training=None):
     """Generate continuous representation for ids.
@@ -199,6 +222,9 @@ class TransformerModel(tf.compat.v1.layers.Layer):
       A float tensors of shape
           [batch_size, input_length, hidden_size].
     """
+    # pad if needed
+    input_ids = self.pad(input_ids)
+
     # Perform embedding lookup on the word ids.
     input_embs = self.embeder(
         input_ids, self.params["max_encoder_length"], training=training)
@@ -208,7 +234,7 @@ class TransformerModel(tf.compat.v1.layers.Layer):
                           tf.ones_like(input_ids), tf.zeros_like(input_ids))
 
     # Run the stacked transformer.
-    encoder_output = self.encoder(input_embs, input_mask, training)
+    encoder_output = self.encoder(input_embs, input_mask, training=training)
 
     return encoder_output, input_mask
 
@@ -229,7 +255,7 @@ class TransformerModel(tf.compat.v1.layers.Layer):
     return inputs
 
   def _decode(self, target_ids, target_mask, start_token_ids,
-              encoder_output, encoder_mask, training):
+              encoder_output, encoder_mask, training=None):
     """Compute likelihood of target tokens under the model.
 
     Args:
@@ -388,7 +414,7 @@ class TransformerModel(tf.compat.v1.layers.Layer):
     return (output_log_probs, output_logits, output_ids)
 
   def _decode_and_predict(self, target_ids, encoder_output, encoder_mask,
-                          training):
+                          training=None):
     """Decodes a sequence given the input and the encoder.
 
     Args:
@@ -429,10 +455,10 @@ class TransformerModel(tf.compat.v1.layers.Layer):
            training=None):
     # Run the inputs through the encoder layer to map the symbol
     # representations to continuous representations.
-    encoder_output, encoder_mask = self._encode(input_ids, training)
+    encoder_output, encoder_mask = self._encode(input_ids, training=training)
 
     # Decode.
     predictions = self._decode_and_predict(target_ids, encoder_output,
-                                           encoder_mask, training)
+                                           encoder_mask, training=training)
 
     return predictions, encoder_output

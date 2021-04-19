@@ -1,4 +1,4 @@
-# Copyright 2020 The BigBird Authors.
+# Copyright 2021 The BigBird Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,11 +15,12 @@
 """BigBird Encoder Layers."""
 
 from bigbird.core import attention
+from bigbird.core import recompute_grad
 from bigbird.core import utils
 import tensorflow.compat.v2 as tf
 
 
-class PrenormEncoderLayer(tf.compat.v1.layers.Layer):
+class PrenormEncoderLayer(tf.keras.layers.Layer):
   """Encoder layer of a transformer in Pegasus style.
 
   The layer_norm is taken before self-attention.
@@ -35,6 +36,7 @@ class PrenormEncoderLayer(tf.compat.v1.layers.Layer):
                initializer_range=0.02,
                num_attention_heads=12,
                num_rand_blocks=3,
+               seq_length=1024,
                block_size=64,
                use_bias=True,
                seed=None,
@@ -54,46 +56,54 @@ class PrenormEncoderLayer(tf.compat.v1.layers.Layer):
       initializer_range: (optional) float. Range of the weight initializer.
       num_attention_heads: (optional) int. Number of attention heads.
       num_rand_blocks: (optional) int. Number of random chunks per row.
+      seq_length: (optional) int. length of sequence.
       block_size: (optional) int. size of block in sequence.
       use_bias: (optional) bool. Whether key/query/value uses a bias vector.
       seed: (Optional) int. Reandom seed for generating random mask.
       name: The name scope of this layer.
     """
     super(PrenormEncoderLayer, self).__init__(name=name)
-    self.hidden_dropout_prob = hidden_dropout_prob
 
-    # Attention layer
-    attention_head_size = hidden_size // num_attention_heads
-    self.attn_layer = attention.MultiHeadedAttentionLayer(
-        attention_type, num_attention_heads, num_rand_blocks,
-        attention_head_size, initializer_range, block_size, block_size,
-        attention_probs_dropout_prob, use_bias, seed, name="self")
+    with tf.compat.v1.variable_scope(name):
 
-    # Dense layers
-    self.projection_layer = utils.Dense3dProjLayer(
-        num_attention_heads, attention_head_size,
-        utils.create_initializer(initializer_range), None, "dense", use_bias)
-    self.expand_layer = utils.Dense2dLayer(
-        intermediate_size, utils.create_initializer(initializer_range),
-        intermediate_act_fn, "dense")
-    self.contract_layer = utils.Dense2dLayer(
-        hidden_size, utils.create_initializer(initializer_range),
-        None, "dense")
+      attention_head_size = hidden_size // num_attention_heads
+      with tf.compat.v1.variable_scope("attention"):
+        # Pre-Normalization layer
+        with tf.compat.v1.variable_scope("self"):
+          self.first_layer_norm = utils.NormLayer(hidden_size)
+        # Self-Attention layer
+        self.attn_layer = attention.MultiHeadedAttentionLayer(
+            attention_type, num_attention_heads, attention_head_size,
+            num_rand_blocks, seq_length, seq_length, block_size, block_size,
+            attention_probs_dropout_prob, initializer_range, use_bias,
+            seed, name="self")
+        # Feedforward layer
+        with tf.compat.v1.variable_scope("output"):
+          self.projection_layer = utils.Dense3dProjLayer(
+              num_attention_heads, attention_head_size,
+              utils.create_initializer(initializer_range), None,
+              "dense", use_bias)
+        # Dropout
+        self.attention_dropout = recompute_grad.RecomputingDropout(
+            hidden_dropout_prob)
 
-    # Normalization layer
-    self.first_layer_norm = utils.NormLayer()
-    self.second_layer_norm = utils.NormLayer()
-
-  @property
-  def trainable_weights(self):
-    tvar_list = (self.attn_layer.trainable_weights +
-                 self.projection_layer.trainable_weights +
-                 self.expand_layer.trainable_weights +
-                 self.contract_layer.trainable_weights +
-                 self.first_layer_norm.trainable_weights +
-                 self.second_layer_norm.trainable_weights)
-    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
-    return self._trainable_weights
+      with tf.compat.v1.variable_scope("intermediate"):
+        # Normalization layer
+        self.second_layer_norm = utils.NormLayer(hidden_size)
+        # Feedforward layer
+        self.expand_layer = utils.Dense2dLayer(
+            hidden_size, intermediate_size,
+            utils.create_initializer(initializer_range),
+            intermediate_act_fn, "dense")
+      with tf.compat.v1.variable_scope("output"):
+        # Feedforward layer
+        self.contract_layer = utils.Dense2dLayer(
+            intermediate_size, hidden_size,
+            utils.create_initializer(initializer_range),
+            None, "dense")
+        # Dropout
+        self.output_dropout = recompute_grad.RecomputingDropout(
+            hidden_dropout_prob)
 
   def call(self,
            layer_input,
@@ -107,24 +117,24 @@ class PrenormEncoderLayer(tf.compat.v1.layers.Layer):
 
     Args:
       layer_input: float Tensor of shape [batch_size, seq_length, hidden_size].
-      attention_mask: (optional) int32 Tensor of shape [batch_size,
+      attention_mask: (optional) float32 Tensor of shape [batch_size,
         seq_length, seq_length]. The values should be 1 or 0. The
         attention scores will effectively be set to -infinity for any positions
         in the mask that are 0, and will be unchanged for positions that are 1.
-      band_mask: (optional) int32 Tensor of shape [batch_size, 1,
+      band_mask: (optional) float32 Tensor of shape [batch_size, 1,
         seq_length//block_size-4, block_size, 3*block_size].
         The values should be 1 or 0. The attention scores will effectively be
         set to -infinity for any positions in the mask that are 0, and will be
         unchanged for positions that are 1.
-      from_mask: (optional) int32 Tensor of shape [batch_size, 1,
+      from_mask: (optional) float32 Tensor of shape [batch_size, 1,
         seq_length, 1]. The values should be 1 or 0. The
         attention scores will effectively be set to -infinity for any positions
         in the mask that are 0, and will be unchanged for positions that are 1.
-      to_mask: (optional) int32 Tensor of shape [batch_size, 1, 1,
+      to_mask: (optional) float32 Tensor of shape [batch_size, 1, 1,
         seq_length]. The values should be 1 or 0. The
         attention scores will effectively be set to -infinity for any positions
         in the mask that are 0, and will be unchanged for positions that are 1.
-      input_blocked_mask: (optional) int32 Tensor of shape [batch_size,
+      input_blocked_mask: (optional) float32 Tensor of shape [batch_size,
         seq_length//block_size, block_size]. Same as from/to_mask, just
         reshaped.
       training: Boolean indicating whether the call is training or inference.
@@ -136,40 +146,33 @@ class PrenormEncoderLayer(tf.compat.v1.layers.Layer):
       ValueError: Any of the arguments or tensor shapes are invalid.
       NotImplementedError: For unknown attention type.
     """
+    # self-attention
+    normalized_layer_input = self.first_layer_norm(layer_input)
+    attention_output = self.attn_layer(
+        normalized_layer_input, normalized_layer_input, [
+            attention_mask, band_mask, from_mask, to_mask, input_blocked_mask,
+            input_blocked_mask
+        ], training=training)
 
-    with tf.compat.v1.variable_scope("attention"):
-      with tf.compat.v1.variable_scope("self") as sc:
-        normalized_layer_input = self.first_layer_norm(layer_input)
-        attention_output = self.attn_layer(
-            normalized_layer_input, normalized_layer_input,
-            attention_mask, band_mask, from_mask, to_mask,
-            input_blocked_mask, input_blocked_mask, training, scope=sc)
-
-      # Run a linear projection of `hidden_size` then add a residual
-      # with `layer_input`.
-      with tf.compat.v1.variable_scope("output"):
-        attention_output = self.projection_layer(attention_output)
-        attention_output = utils.dropout(attention_output,
-                                         self.hidden_dropout_prob,
-                                         training)
-        attention_output = attention_output + layer_input
+    # Run a linear projection of `hidden_size` then add a residual
+    # with `layer_input`.
+    attention_output = self.projection_layer(attention_output)
+    attention_output = self.attention_dropout(attention_output,
+                                              training=training)
+    attention_output = attention_output + layer_input
 
     # The activation is only applied to the "intermediate" hidden layer.
-    with tf.compat.v1.variable_scope("intermediate"):
-      normalized_attention_output = self.second_layer_norm(attention_output)
-      intermediate_output = self.expand_layer(normalized_attention_output)
+    normalized_attention_output = self.second_layer_norm(attention_output)
+    intermediate_output = self.expand_layer(normalized_attention_output)
 
     # Down-project back to `hidden_size` then add the residual.
-    with tf.compat.v1.variable_scope("output"):
-      layer_output = self.contract_layer(intermediate_output)
-      layer_output = utils.dropout(layer_output,
-                                   self.hidden_dropout_prob,
-                                   training)
-      layer_output = layer_output + attention_output
+    layer_output = self.contract_layer(intermediate_output)
+    layer_output = self.output_dropout(layer_output, training=training)
+    layer_output = layer_output + attention_output
     return layer_output
 
 
-class PostnormEncoderLayer(tf.compat.v1.layers.Layer):
+class PostnormEncoderLayer(tf.keras.layers.Layer):
   """Encoder layer of a transformer in BERT style.
 
   The layer_norm is taken after self-attention.
@@ -185,6 +188,7 @@ class PostnormEncoderLayer(tf.compat.v1.layers.Layer):
                initializer_range=0.02,
                num_attention_heads=12,
                num_rand_blocks=3,
+               seq_length=1024,
                block_size=64,
                use_bias=True,
                seed=None,
@@ -204,46 +208,55 @@ class PostnormEncoderLayer(tf.compat.v1.layers.Layer):
       initializer_range: (optional) float. Range of the weight initializer.
       num_attention_heads: (optional) int. Number of attention heads.
       num_rand_blocks: (optional) int. Number of random chunks per row.
+      seq_length: (optional) int. length of sequence.
       block_size: (optional) int. size of block in sequence.
       use_bias: (optional) bool. Whether key/query/value uses a bias vector.
       seed: (Optional) int. Reandom seed for generating random mask.
       name: The name scope of this layer.
     """
     super(PostnormEncoderLayer, self).__init__(name=name)
-    self.hidden_dropout_prob = hidden_dropout_prob
 
-    # Attention layer
-    attention_head_size = hidden_size // num_attention_heads
-    self.attn_layer = attention.MultiHeadedAttentionLayer(
-        attention_type, num_attention_heads, num_rand_blocks,
-        attention_head_size, initializer_range, block_size, block_size,
-        attention_probs_dropout_prob, use_bias, seed, name="self")
+    with tf.compat.v1.variable_scope(name):
 
-    # Dense layers
-    self.projection_layer = utils.Dense3dProjLayer(
-        num_attention_heads, attention_head_size,
-        utils.create_initializer(initializer_range), None, "dense", use_bias)
-    self.expand_layer = utils.Dense2dLayer(
-        intermediate_size, utils.create_initializer(initializer_range),
-        intermediate_act_fn, "dense")
-    self.contract_layer = utils.Dense2dLayer(
-        hidden_size, utils.create_initializer(initializer_range),
-        None, "dense")
+      attention_head_size = hidden_size // num_attention_heads
+      with tf.compat.v1.variable_scope("attention"):
+        # Self-Attention layer
+        self.attn_layer = attention.MultiHeadedAttentionLayer(
+            attention_type, num_attention_heads, attention_head_size,
+            num_rand_blocks, seq_length, seq_length, block_size, block_size,
+            attention_probs_dropout_prob, initializer_range, use_bias,
+            seed, name="self")
 
-    # Normalization layer
-    self.first_layer_norm = utils.NormLayer()
-    self.second_layer_norm = utils.NormLayer()
+        with tf.compat.v1.variable_scope("output"):
+          # Feedforward layer
+          self.projection_layer = utils.Dense3dProjLayer(
+              num_attention_heads, attention_head_size,
+              utils.create_initializer(initializer_range), None,
+              "dense", use_bias)
+          # Post-Normalization layer
+          self.first_layer_norm = utils.NormLayer(hidden_size)
+          # Dropout
+          self.attention_dropout = recompute_grad.RecomputingDropout(
+              hidden_dropout_prob)
 
-  @property
-  def trainable_weights(self):
-    tvar_list = (self.attn_layer.trainable_weights +
-                 self.projection_layer.trainable_weights +
-                 self.expand_layer.trainable_weights +
-                 self.contract_layer.trainable_weights +
-                 self.first_layer_norm.trainable_weights +
-                 self.second_layer_norm.trainable_weights)
-    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
-    return self._trainable_weights
+      with tf.compat.v1.variable_scope("intermediate"):
+        # Feedforward layer
+        self.expand_layer = utils.Dense2dLayer(
+            hidden_size, intermediate_size,
+            utils.create_initializer(initializer_range),
+            intermediate_act_fn, "dense")
+
+      with tf.compat.v1.variable_scope("output"):
+        # Feedforward layer
+        self.contract_layer = utils.Dense2dLayer(
+            intermediate_size, hidden_size,
+            utils.create_initializer(initializer_range),
+            None, "dense")
+        # Normalization layer
+        self.second_layer_norm = utils.NormLayer(hidden_size)
+        # Dropout
+        self.output_dropout = recompute_grad.RecomputingDropout(
+            hidden_dropout_prob)
 
   def call(self,
            layer_input,
@@ -257,24 +270,24 @@ class PostnormEncoderLayer(tf.compat.v1.layers.Layer):
 
     Args:
       layer_input: float Tensor of shape [batch_size, seq_length, hidden_size].
-      attention_mask: (optional) int32 Tensor of shape [batch_size,
+      attention_mask: (optional) float32 Tensor of shape [batch_size,
         seq_length, seq_length]. The values should be 1 or 0. The
         attention scores will effectively be set to -infinity for any positions
         in the mask that are 0, and will be unchanged for positions that are 1.
-      band_mask: (optional) int32 Tensor of shape [batch_size, 1,
+      band_mask: (optional) float32 Tensor of shape [batch_size, 1,
         seq_length//block_size-4, block_size, 3*block_size].
         The values should be 1 or 0. The attention scores will effectively be
         set to -infinity for any positions in the mask that are 0, and will be
         unchanged for positions that are 1.
-      from_mask: (optional) int32 Tensor of shape [batch_size, 1,
+      from_mask: (optional) float32 Tensor of shape [batch_size, 1,
         seq_length, 1]. The values should be 1 or 0. The
         attention scores will effectively be set to -infinity for any positions
         in the mask that are 0, and will be unchanged for positions that are 1.
-      to_mask: (optional) int32 Tensor of shape [batch_size, 1, 1,
+      to_mask: (optional) float32 Tensor of shape [batch_size, 1, 1,
         seq_length]. The values should be 1 or 0. The
         attention scores will effectively be set to -infinity for any positions
         in the mask that are 0, and will be unchanged for positions that are 1.
-      input_blocked_mask: (optional) int32 Tensor of shape [batch_size,
+      input_blocked_mask: (optional) float32 Tensor of shape [batch_size,
         seq_length//block_size, block_size]. Same as from/to_mask, just
         reshaped.
       training: Boolean indicating whether the call is training or inference.
@@ -286,38 +299,59 @@ class PostnormEncoderLayer(tf.compat.v1.layers.Layer):
       ValueError: Any of the arguments or tensor shapes are invalid.
       NotImplementedError: For unknown attention type.
     """
+    # self-attention
+    attention_output = self.attn_layer(
+        layer_input, layer_input, [
+            attention_mask, band_mask, from_mask, to_mask, input_blocked_mask,
+            input_blocked_mask
+        ], training=training)
 
-    with tf.compat.v1.variable_scope("attention"):
-      with tf.compat.v1.variable_scope("self") as sc:
-        attention_output = self.attn_layer(
-            layer_input, layer_input,
-            attention_mask, band_mask, from_mask, to_mask,
-            input_blocked_mask, input_blocked_mask, training, scope=sc)
-
-      # Run a linear projection of `hidden_size` then add a residual
-      # with `layer_input`.
-      with tf.compat.v1.variable_scope("output"):
-        attention_output = self.projection_layer(attention_output)
-        attention_output = utils.dropout(attention_output,
-                                         self.hidden_dropout_prob,
-                                         training)
-        attention_output = self.first_layer_norm(attention_output + layer_input)
+    # Run a linear projection of `hidden_size` then add a residual
+    # with `layer_input`.
+    attention_output = self.projection_layer(attention_output)
+    attention_output = self.attention_dropout(attention_output,
+                                              training=training)
+    attention_output = self.first_layer_norm(attention_output + layer_input)
 
     # The activation is only applied to the "intermediate" hidden layer.
-    with tf.compat.v1.variable_scope("intermediate"):
-      intermediate_output = self.expand_layer(attention_output)
+    intermediate_output = self.expand_layer(attention_output)
 
     # Down-project back to `hidden_size` then add the residual.
-    with tf.compat.v1.variable_scope("output"):
-      layer_output = self.contract_layer(intermediate_output)
-      layer_output = utils.dropout(layer_output,
-                                   self.hidden_dropout_prob,
-                                   training)
-      layer_output = self.second_layer_norm(layer_output + attention_output)
+    layer_output = self.contract_layer(intermediate_output)
+    layer_output = self.output_dropout(layer_output, training=training)
+    layer_output = self.second_layer_norm(layer_output + attention_output)
     return layer_output
 
 
-class EncoderStack(tf.compat.v1.layers.Layer):
+def add_gradient_recomputation(original_class):
+  """Creats a subclass which enables gradient checkpointing."""
+
+  class RecomputeLayer(original_class):
+    """Transformer layer that recomputes the forward pass during backprop."""
+
+    def call(self,
+             layer_input,
+             attention_mask=None,
+             band_mask=None,
+             from_mask=None,
+             to_mask=None,
+             input_blocked_mask=None,
+             training=None):
+      def f(layer_input, attention_mask, band_mask,
+            from_mask, to_mask, input_blocked_mask):
+        x = super(RecomputeLayer, self).call(
+            layer_input, attention_mask, band_mask, from_mask, to_mask,
+            input_blocked_mask, training=training)
+        return x
+
+      f = recompute_grad.recompute_grad(f)
+
+      return f(layer_input, attention_mask, band_mask,
+               from_mask, to_mask, input_blocked_mask)
+  return RecomputeLayer
+
+
+class EncoderStack(tf.keras.layers.Layer):
   """Transformer encoder stack."""
 
   def __init__(self, params):
@@ -333,35 +367,32 @@ class EncoderStack(tf.compat.v1.layers.Layer):
       raise NotImplementedError(
           "Norm type {} is not implemented".format(params["norm_type"]))
 
-    # Encoder layers
-    self.encoder_layers = [
-        encoder_class(  # pylint: disable=g-complex-comprehension
-            self.params["attention_type"],
-            self.params["hidden_size"],
-            self.params["intermediate_size"],
-            utils.get_activation(self.params["hidden_act"]),
-            self.params["attention_probs_dropout_prob"],
-            self.params["hidden_dropout_prob"],
-            self.params["initializer_range"],
-            self.params["num_attention_heads"],
-            self.params["num_rand_blocks"],
-            self.params["block_size"],
-            self.params["use_bias"],
-            seed=layer_idx,
-            name="layer_%d" % layer_idx)
-        for layer_idx in range(self.params["num_hidden_layers"])
-    ]
+    if params["use_gradient_checkpointing"]:
+      encoder_class = add_gradient_recomputation(encoder_class)
 
-    # Normalization layer
-    self.layer_norm = utils.NormLayer()
+    with tf.compat.v1.variable_scope(name):
+      # Encoder layers
+      self.encoder_layers = [
+          encoder_class(  # pylint: disable=g-complex-comprehension
+              self.params["attention_type"],
+              self.params["hidden_size"],
+              self.params["intermediate_size"],
+              utils.get_activation(self.params["hidden_act"]),
+              self.params["attention_probs_dropout_prob"],
+              self.params["hidden_dropout_prob"],
+              self.params["initializer_range"],
+              self.params["num_attention_heads"],
+              self.params["num_rand_blocks"],
+              self.params["max_encoder_length"],
+              self.params["block_size"],
+              self.params["use_bias"],
+              seed=layer_idx,
+              name="layer_%d" % layer_idx)
+          for layer_idx in range(self.params["num_hidden_layers"])
+      ]
 
-  @property
-  def trainable_weights(self):
-    tvar_list = sum(
-        [layer.trainable_weights for layer in self.encoder_layers],
-        []) +  self.layer_norm.trainable_weights
-    self._trainable_weights = list({v.name: v for v in tvar_list}.values())
-    return self._trainable_weights
+      # Normalization layer
+      self.layer_norm = utils.NormLayer(self.params["hidden_size"])
 
   def call(self,
            encoder_inputs,
@@ -379,37 +410,36 @@ class EncoderStack(tf.compat.v1.layers.Layer):
       Finaly layer encoder output. float tensor with shape
         [batch_size, input_length, hidden_size]
     """
-    encoder_shape = utils.get_shape_list(encoder_inputs, expected_rank=3)
-    batch_size = encoder_shape[0]
-    encoder_length = encoder_shape[1]
-
     if self.params["attention_type"] == "block_sparse":
       # reshape and cast for blocking
+      encoder_length = self.params["max_encoder_length"]
       encoder_block_size = self.params["block_size"]
+      encoder_inputs_mask = tf.cast(encoder_inputs_mask, tf.float32)
       blocked_encoder_mask = tf.reshape(
           encoder_inputs_mask,
-          (batch_size, encoder_length//encoder_block_size, encoder_block_size))
+          (-1, encoder_length//encoder_block_size, encoder_block_size))
       encoder_from_mask = tf.reshape(encoder_inputs_mask,
-                                     (batch_size, 1, encoder_length, 1))
+                                     (-1, 1, encoder_length, 1))
       encoder_to_mask = tf.reshape(encoder_inputs_mask,
-                                   (batch_size, 1, 1, encoder_length))
+                                   (-1, 1, 1, encoder_length))
 
       # create band padding
-      attention_mask = None
       band_mask = attention.create_band_mask_from_inputs(
           blocked_encoder_mask, blocked_encoder_mask)
 
-    else:
-      blocked_encoder_mask = None
-      encoder_to_mask = None
-      encoder_from_mask = None
+      # For unused masks 0 instead of None for compatilibity with recompute_grad
+      attention_mask = 0.0
 
+    else:
+      # For unused masks 0 instead of None for compatilibity with recompute_grad
+      blocked_encoder_mask = 0.0
+      encoder_to_mask = 0.0
+      encoder_from_mask = 0.0
+      band_mask = 0.0
+
+      encoder_inputs_mask = tf.cast(encoder_inputs_mask, tf.float32)
       attention_mask = attention.create_attention_mask_from_input_mask(
           encoder_inputs_mask, encoder_inputs_mask)
-      band_mask = None
-
-    # if self.params["use_gradient_checkpointing"]:
-    #   encoder_layer = recompute_gradient(encoder_layer)
 
     if self.params["norm_type"] == "postnorm":
       encoder_inputs = self.layer_norm(encoder_inputs)
@@ -418,7 +448,8 @@ class EncoderStack(tf.compat.v1.layers.Layer):
     for layer in self.encoder_layers:
       layer_output = layer(
           layer_output, attention_mask, band_mask,
-          encoder_from_mask, encoder_to_mask, blocked_encoder_mask, training)
+          encoder_from_mask, encoder_to_mask, blocked_encoder_mask,
+          training=training)
 
     if self.params["norm_type"] == "prenorm":
       layer_output = self.layer_norm(layer_output)

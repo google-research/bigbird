@@ -1,4 +1,4 @@
-# Copyright 2020 The BigBird Authors.
+# Copyright 2021 The BigBird Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -459,6 +459,7 @@ def main(_):
 
   model_fn = model_fn_builder(transformer_config)
   estimator = utils.get_estimator(transformer_config, model_fn)
+  tmp_data_dir = os.path.join(FLAGS.output_dir, "tfds")
 
   if FLAGS.do_train:
     logging.info("***** Running training *****")
@@ -470,7 +471,7 @@ def main(_):
         max_encoder_length=FLAGS.max_encoder_length,
         max_decoder_length=FLAGS.max_decoder_length,
         substitute_newline=FLAGS.substitute_newline,
-        tmp_dir=os.path.join(FLAGS.output_dir, "tfds"),
+        tmp_dir=tmp_data_dir,
         is_training=True)
     estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
 
@@ -484,7 +485,7 @@ def main(_):
         max_encoder_length=FLAGS.max_encoder_length,
         max_decoder_length=FLAGS.max_decoder_length,
         substitute_newline=FLAGS.substitute_newline,
-        tmp_dir=os.path.join(FLAGS.output_dir, "tfds"),
+        tmp_dir=tmp_data_dir,
         is_training=False)
 
     # Run continuous evaluation for latest checkpoint as training progresses.

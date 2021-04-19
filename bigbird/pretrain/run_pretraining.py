@@ -1,4 +1,4 @@
-# Copyright 2020 The BigBird Authors.
+# Copyright 2021 The BigBird Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -460,7 +460,7 @@ def model_fn_builder(bert_config):
   return model_fn
 
 
-class MaskedLMLayer(tf.compat.v1.layers.Layer):
+class MaskedLMLayer(tf.keras.layers.Layer):
   """Get loss and log probs for the masked LM."""
 
   def __init__(self,
@@ -478,9 +478,9 @@ class MaskedLMLayer(tf.compat.v1.layers.Layer):
     # We apply one more non-linear transformation before the output layer.
     # This matrix is not used after pre-training.
     self.extra_layer = utils.Dense2dLayer(
-        hidden_size, initializer,
+        hidden_size, hidden_size, initializer,
         activation_fn, "transform")
-    self.norm_layer = utils.NormLayer("transform")
+    self.norm_layer = utils.NormLayer(hidden_size, name="transform")
 
     # The output weights are the same as the input embeddings, but there is
     # an output-only bias for each token.
@@ -491,7 +491,7 @@ class MaskedLMLayer(tf.compat.v1.layers.Layer):
 
   @property
   def trainable_weights(self):
-    self._trainable_weights = (self.extra_layer +
+    self._trainable_weights = (self.extra_layer.trainable_weights +
                                self.norm_layer.trainable_weights +
                                [self.output_bias])
     return self._trainable_weights
@@ -505,9 +505,8 @@ class MaskedLMLayer(tf.compat.v1.layers.Layer):
 
     # We apply one more non-linear transformation before the output layer.
     # This matrix is not used after pre-training.
-    with tf.compat.v1.variable_scope("transform") as sc:
-      input_tensor = self.extra_layer(input_tensor, scope=sc)
-      input_tensor = self.norm_layer(input_tensor, scope=sc)
+    input_tensor = self.extra_layer(input_tensor)
+    input_tensor = self.norm_layer(input_tensor)
 
     # The output weights are the same as the input embeddings, but there is
     # an output-only bias for each token.
@@ -533,7 +532,7 @@ class MaskedLMLayer(tf.compat.v1.layers.Layer):
     return loss, log_probs
 
 
-class NSPLayer(tf.compat.v1.layers.Layer):
+class NSPLayer(tf.keras.layers.Layer):
   """Get loss and log probs for the next sentence prediction."""
 
   def __init__(self,
@@ -590,6 +589,7 @@ def main(_):
 
   model_fn = model_fn_builder(bert_config)
   estimator = utils.get_estimator(bert_config, model_fn)
+  tmp_data_dir = os.path.join(FLAGS.output_dir, "tfds")
 
   if FLAGS.do_train:
     logging.info("***** Running training *****")
@@ -603,7 +603,7 @@ def main(_):
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         preprocessed_data=FLAGS.preprocessed_data,
         substitute_newline=FLAGS.substitute_newline,
-        tmp_dir=os.path.join(FLAGS.output_dir, "tfds"),
+        tmp_dir=tmp_data_dir,
         is_training=True)
     estimator.train(input_fn=train_input_fn, max_steps=FLAGS.num_train_steps)
 
@@ -619,7 +619,7 @@ def main(_):
         max_predictions_per_seq=FLAGS.max_predictions_per_seq,
         preprocessed_data=FLAGS.preprocessed_data,
         substitute_newline=FLAGS.substitute_newline,
-        tmp_dir=os.path.join(FLAGS.output_dir, "tfds"),
+        tmp_dir=tmp_data_dir,
         is_training=False)
 
     # Run continuous evaluation for latest checkpoint as training progresses.
