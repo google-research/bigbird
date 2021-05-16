@@ -33,7 +33,7 @@ There are three main files in `core`.
     Contains BigBird linear attention mechanism
 *   [encoder.py](bigbird/core/encoder.py):
     Contains the main long sequence encoder stack
-*   [modeling.py](bigbird/core/modeling):
+*   [modeling.py](bigbird/core/modeling.py):
     Contains packaged BERT and seq2seq transformer models with BigBird attention
 
 
