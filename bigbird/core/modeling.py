@@ -33,10 +33,14 @@ class BertModel(tf.keras.layers.Layer):
   input_ids = tf.constant([[31, 51, 99], [15, 5, 0]])
   token_type_ids = tf.constant([[0, 0, 1], [0, 2, 0]])
 
-  params = utils.BigBirdConfig(vocab_size=32000, hidden_size=512,
-    num_hidden_layers=8, num_attention_heads=6, intermediate_size=1024)
+  params=utils.get_default_config()
+  params['vocab_size']=32000
+  params['hidden_size']=512,
+  params['num_hidden_layers']=8
+  params['num_attention_heads']=6
+  params['intermediate_size']=1024
 
-  model = modeling.BertModel(params, train=True)
+  model = modeling.BertModel(params, training=True)
 
   _, pooled_output = model(input_ids=input_ids, token_type_ids=token_type_ids)
 
