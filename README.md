@@ -8,7 +8,7 @@ BigBird, is a sparse-attention based transformer which extends Transformer based
 As a consequence of the capability to handle longer context,
 BigBird drastically improves performance on various NLP tasks such as question answering and summarization.
 
-More details and comparisons can be found in our [presentation](https://docs.google.com/presentation/d/1FdMNqG2b8XYc89_v7-_2sba7Iz6YAlXXWuMxUbrKFK0/preview).
+More details and comparisons can be found in our [presentation](https://docs.google.com/presentation/d/1FdMNqG2b8XYc89_v7-_2sba7Iz6YAlXXWuMxUbrKFK0/preview?resourcekey=0-KHcdpCx83g7a2JNz0h0-6w).
 
 
 # Citation
